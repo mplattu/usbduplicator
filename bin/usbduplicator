@@ -1,0 +1,530 @@
+#!/usr/bin/python
+
+# This file is part of USBduplicator.
+# 
+# USBduplicator is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# USBduplicator is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with USBduplicator.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright 2013-2015 Matti Lattu
+
+import os, sys, re, socket, time, atexit, fcntl, signal
+from multiprocessing.connection import Listener
+from subprocess import Popen, STDOUT, PIPE
+from array import array
+from Tkinter import *
+import tkMessageBox, tkFileDialog
+from gi.repository import Notify
+
+SOCKET="/tmp/usbduplicator"
+PATH_MOUNT="/bin/mount"
+PATH_UNMOUNT="/bin/umount"
+PATH_DD="/bin/dd"
+PATH_ICON="/usr/share/usbduplicator/usbduplicator.gif"
+VERSION="0.14"
+
+def is_exe(fpath):
+     return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+def end_cleanup ():
+	# Call this before exiting the program
+	# Cleans up
+
+	try:
+		app.dc.kill_writers()
+	except:
+		print "No disk writer to kill"
+		
+	try:
+		app.listener.close()
+	except:
+		print "No app listener to close"
+			
+	try:
+		os.remove(SOCKET)
+	except:
+		print "No socket file to remove"
+		
+	# Destroy root window
+	#root.destroy()
+	exit(0)
+
+def generate_file_md5(filename, blocksize=2**20):
+    m = hashlib.md5()
+    with open(filename , "rb" ) as f:
+        while True:
+            buf = f.read(blocksize)
+            if not buf:
+                break
+            m.update( buf )
+    return m.hexdigest()
+
+def non_block_read(output):
+    ''' even in a thread, a normal read with block until the buffer is full '''
+    fd = output.fileno()
+    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+    try:
+        return output.read()
+    except:
+        return ''
+
+def notify_user(message):
+	# Send Desktop notification
+	print "notify_user: "+message
+	this_notification=Notify.Notification.new("USBduplicator",message,"dialog-information")
+	this_notification.show()
+	 
+class USBduplicatorUnmountFailed(Exception):
+	def __init__(self, device_path):
+		self.device_path = device_path
+		Exception.__init__(self, 'Failed to unmount device %s' % device_path)
+		
+class Disk_Copier:
+	def __init__(self):
+		# Contains process objects
+		self.popen_stack = list()
+		# Contains process data
+		self.process_status = list()
+		
+		# Contains last image path and other info
+		self.disk_image_path = None
+		self.disk_image_size = None
+		self.disk_image_md5 = None
+		
+		# Timestamp of the last update (see get_status())
+		self.last_update_timestamp = 0
+		# Update every 5 seconds
+		self.LAST_UPDATE_REFRESH = 5
+		# Last status array
+		self.last_status_info = []
+		
+	def write_data(self, device_name, disk_image):
+		# Check that device_name is writeable for the user
+		if (not os.access(device_name, os.W_OK)):
+			tkMessageBox.showerror("USBduplicator", "USB device "+device_name+" is not writeable. Could not start write. Maybe you should be root?")
+			return
+		
+		if (disk_image != self.disk_image_path):
+			# We have a new image
+			self.disk_image_path = disk_image
+			self.disk_image_size = os.path.getsize(self.disk_image_path)
+
+			# This is commented out as we don't currently verify the written image
+			#print "Calculating image MD5"
+			#self.disk_image_md5 = generate_file_md5(self.disk_image_path)
+			#self.disk_image_md5 = "none"
+			#print "New file MD5: "+self.disk_image_md5
+		
+		try:
+			self.unmount_all(device_name)
+		except USBduplicatorUnmountFailed:
+			tkMessageBox.showerror("USBduplicator", "Failed to unmount devices related to "+device_name+" ("+self.get_device_bus(device_name)+"). Could not start write.")
+		else:
+			file_null = open(os.devnull, 'w')
+			notify_user("Spawn external process to write data to "+device_name+" ("+self.get_device_bus(device_name)+") from image "+disk_image)
+			
+			# Set update timestamp in order to give time for dd to get things going
+			self.last_update_timestamp = time.time()
+			
+			# It would be nice to somehow auto-detect maximum block size from the amount of free memory
+			# However, we never know how many write processes the user wants to start
+			# Therefore we just use some smallish size
+			dd_command = [PATH_DD, "if="+disk_image, "of="+device_name, "bs=10240", "oflag=direct"]
+			
+			# Change locale to avoid localised dd output
+			this_env = os.environ
+			this_env["LANG"] = "C"
+			self.popen_stack.append(Popen(dd_command, env=this_env, stdin=file_null, stdout=PIPE, stderr=STDOUT))
+			self.process_status.append([self.popen_stack[-1].pid, device_name, time.time(), None, 0])
+
+	def count_pending_writes (self):
+		# Count pending write processes from self.process_status
+		process_count = 0
+		for n, item in enumerate(self.popen_stack):
+			if (self.process_status[n][3] == None):
+				# No end time is recorded, the process should be still running		
+				process_count += 1
+		return process_count
+		
+	def cleanup(self):
+		# Reads exit code for all processes (call this to avoid zombie processes)
+		for n, item in enumerate(self.popen_stack):
+			#print "Checking PID "+str(self.process_status[n][0])
+			item.poll()
+			if (item.returncode == None):
+				# Process is still running
+				this_output = non_block_read(item.stdout)
+				m_obj = re.search(r"(\d+) bytes", this_output)
+				if m_obj:
+					self.process_status[n][4]=int(m_obj.group(1))
+					
+			if (item.returncode != None and self.process_status[n][3] == None):
+				# Process has ended
+				self.process_status[n][3] = time.time()
+				# Count process time in minutes
+				process_time = (self.process_status[n][3] - self.process_status[n][2]) / 60
+				process_count = self.count_pending_writes()
+				if (item.returncode == 0):
+					notify_user("Process PID "+str(self.process_status[n][0])+" writing device "+self.process_status[n][1]+" ("+self.get_device_bus(self.process_status[n][1])+") has stopped after "+str(round(process_time,2))+" minutes: SUCCESS")
+				else:
+					tkMessageBox.showerror("USBduplicator", "Process PID "+str(self.process_status[n][0])+" writing device "+self.process_status[n][1]+" ("+self.get_device_bus(self.process_status[n][1])+") has stopped after "+str(round(process_time,2))+" minutes: FAILED (#"+str(item.returncode)+")")
+				if (process_count == 0):
+					tkMessageBox.showinfo("USBduplicator", "All current write processes have ended! You may remove all USB memory sticks.")
+
+
+	def get_status (self):
+		# Get status to associative array
+		
+		if (time.time() < self.last_update_timestamp + self.LAST_UPDATE_REFRESH):
+			# We don't need to update yet, return last status
+			return self.last_status_info
+			
+		# Send SIGUSR1 to all processes to get update from dd
+		for n, item in enumerate(self.popen_stack):
+			if (self.process_status[n][3] == None):
+				# This process is still running
+				item.send_signal(signal.SIGUSR1)
+		
+		# Now call cleanup to set the write status
+		self.cleanup()
+		
+		# Collect status info to this associative array
+		status_info = {}
+		
+		# Go through the processes and store data
+		for n, item in enumerate(self.popen_stack):
+			if (self.process_status[n][3] == None):
+				# This process is still running
+				devstr = self.process_status[n][1]
+				status_info[devstr] = {}
+				status_info[devstr]['device_bus'] = self.get_device_bus(devstr)
+				status_info[devstr]['completed'] = int(round((float(self.process_status[n][4])/self.disk_image_size)*100))
+				status_info[devstr]['pid'] = self.process_status[n][0]
+		
+		self.last_status_info = status_info
+		
+		# Set the update timestamp
+		self.last_update_timestamp = time.time()
+
+		return status_info
+
+	def update_status (self):
+		# Updates class-level status variable
+		
+		self.status_info = self.get_status()
+	
+	def execute_out (self, params):
+		# Execute external program and return output (STDOUT)
+		try:
+			proc = Popen(params, stdout=PIPE)
+		except OSError:
+			tkMessageBox.showerror("USBduplicator", sys.argv[0]+": Could not spawn subprocess "+params[0])
+		else:
+			(out, err) = proc.communicate()
+			return out
+		return None
+		
+	def execute_err (self, params):
+		# Execute externam program and return exit status
+		try:
+			proc = Popen(params)
+		except OSError:
+			tkMessageBox.showerror("USBduplicator", sys.argv[0]+": Could not spawn subprocess "+params[0])
+		else:
+			proc.wait()
+			return proc.returncode
+		return None
+	
+	def unmount_all (self, device_name):
+		# Unmount all devices related to device_name
+		# device_name should point to device (e.g. /dev/sdb) and not to partition (e.g. /dev/sdb1)
+	
+		# List mounted devices
+		mount_output = self.execute_out(PATH_MOUNT)
+	
+		# Process through devices
+		for this_mount_output in re.split('\n', mount_output):
+			m=re.match("^("+device_name+".+?) ", this_mount_output)
+			if m != None:
+				# Execute umount
+				unmount_exit_code = self.execute_err([PATH_UNMOUNT, m.group(1)])
+				if  unmount_exit_code != 0:
+					# Unmount failed
+					raise USBduplicatorUnmountFailed(m.group(1))
+
+	def get_device_bus (self, device_path):
+		# Get physical device bus string from device_path (e.g. /dev/sdb)
+		# Return magic string if not found
+		DETECT_FAILED = "UNKNOWN"
+		
+		# Get device part from device_path
+		dev_match = re.search(r"\/([^\/]+?)$", device_path)
+		if dev_match:
+			try:
+				blk_target = os.path.abspath(os.path.join("/sys/block", os.readlink("/sys/block/"+dev_match.group(1))))
+			except:
+				return DETECT_FAILED
+			
+			# The matching device path is dev_match
+			
+			# Get the longest substring matching "\d-\d+(.\d+)*"  # e.g. 1-2.1
+			dev_path_parts = blk_target.split("/")
+			dev_bus = ""
+			
+			for dev_path_part in dev_path_parts:
+				part_match = re.search(r"\d-\d+(.\d+)*", dev_path_part)
+				if part_match:
+					# This part matches
+					if len(dev_path_part) > len(dev_bus):
+						dev_bus = dev_path_part
+			
+			if dev_bus == "":
+				return DETECT_FAILED
+			
+			# We have a USB bus (e.g. 1-2.1)
+			usbid_match=re.search(r"^(\d)\-(.+):", dev_bus)
+			if usbid_match:
+				# Return formatted USB bus
+				return "USB"+usbid_match.group(1)+"-"+usbid_match.group(2)
+			else:
+				# Return raw USB bus
+				return dev_bus
+		else:
+			return DETECT_FAILED
+		
+		for this_file in os.listdir("/dev/disk/by-path"):
+			link_target = os.path.abspath(os.path.join("/dev/disk/by-path", os.readlink("/dev/disk/by-path/"+this_file)))
+			if link_target == device_path:
+				return this_file
+
+		return "UNKNOWN"
+
+	def kill_writers (self):
+		# Go through the processes and send kill signal to all active processes
+		for n, item in enumerate(self.popen_stack):
+			if (self.process_status[n][3] == None):
+				# This process is still running
+				item.send_signal(signal.SIGKILL)
+
+class Application:
+	
+	def __init__(self, master):
+		self.master = master
+
+		self.NO_WRITES_TEXT = "No active write processes. Plug in one or more USB memory to start writing."
+		
+		#self.label_update = Label(master, textvariable = self.label_update_text, padx=5, pady=5)
+		#self.label_update = Label(master, padx=5, pady=5)
+		self.label_update = Message(master, padx=5, pady=5, justify=CENTER, width=300)
+		self.label_update.config(text = self.NO_WRITES_TEXT)
+		self.label_update.pack()
+		
+		# Create disk copier instance
+		self.dc = Disk_Copier()
+
+		# always_write[] stores device types that should be written without prompting
+		self.always_write = list()
+
+		# Open listener which allows udev initiated part to connect
+		self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+		self.listener.bind(SOCKET)
+		self.listener.setblocking(0)
+
+		# Call check_new_device() in 1000 milliseconds
+		self.id_after = self.master.after(1000, self.check_new_device)
+		
+	
+	def check_new_device (self):
+		try:
+			# Read message from usbduplicator_server
+			msg = self.listener.recv(1024)
+		except KeyboardInterrupt:
+			print "Exiting..."
+			end_cleanup()
+		except:
+			# Update process status
+			self.dc.update_status()
+			status_info = self.dc.get_status()
+			
+			# Build ugly string for status data
+			status_lines = []
+			
+			for this_device in status_info:
+				status_lines.append("PID "+str(status_info[this_device]['pid'])+" writing device "+this_device+" ("+status_info[this_device]['device_bus']+"): "+str(status_info[this_device]['completed'])+"%")
+				
+			if (len(status_lines) > 0):
+				self.label_update.config(text = "\n".join(status_lines))
+			else:
+				self.label_update.config(text = self.NO_WRITES_TEXT)
+			self.master.update_idletasks()
+
+			self.id_after = self.master.after(1000, self.check_new_device)
+			return
+	
+		try:
+			msg_list = msg.split("\t")
+			device_name = re.sub(r'[^a-z0-9A-Z\_/\. ]', "", msg_list[0])
+			device_path = re.sub(r'[^a-z0-9A-Z\_/]', "", msg_list[1])
+			
+			# Is this device type in always list?
+			try:
+				# Found in the list
+				i = self.always_write.index(device_name)
+			except ValueError:
+				# Not found
+				i = -1
+
+			if i >= 0:
+				# This device is already registered, start writing...
+				print "Device '"+device_name+"' is in the list of auto-written devices"
+				self.dc.write_data(device_path, disk_image)
+			else:
+				# This device is manual
+				self.dc.cleanup()
+
+				ddialog_question="Would you like to write data to '"+device_name+"' at "+device_path+" ("+self.dc.get_device_bus(device_path)+")?"
+				ddialog = Drive_Dialog(self.master, ddialog_question)
+				self.master.wait_window(ddialog.top)
+				
+				if ddialog.returnvalue == 'yes':
+					print "Writing '"+device_name+"'"
+					self.dc.write_data(device_path, disk_image)
+				if ddialog.returnvalue == 'always':
+					self.always_write.append(device_name)
+					print "Added '"+device_name+"' to list of auto-written devices"
+					self.dc.write_data(device_path, disk_image)
+				if ddialog.returnvalue == 'no':
+					print "Skipping '"+device_name+"'"
+			
+		except EOFError:
+			print "No message"
+		
+		# Call check_new_device() in 1000 milliseconds
+		# can cancel the call by self.after_cancel(self.id)
+		self.id_after = self.master.after(1000, self.check_new_device)
+
+class Drive_Dialog:
+
+	def __init__ (self, parent, message):
+		top = self.top = Toplevel(parent)
+		top.title("USBduplicatior Question")
+		
+		self.returnvalue = None
+		
+		Label(top, text=message).pack()
+		
+		b_yes = Button(top, text="Yes", command=self.button_yes)
+		b_yes.pack(pady=5)
+
+		b_no = Button(top, text="No", command=self.button_no)
+		b_no.pack(pady=5)
+
+		b_always = Button(top, text="Always", command=self.button_always)
+		b_always.pack(pady=5)
+
+	def button_yes (self):
+		self.returnvalue = 'yes'
+		self.top.destroy()
+	
+	def button_no (self):
+		self.returnvalue = 'no'
+		self.top.destroy()
+	
+	def button_always (self):
+		self.returnvalue = 'always'
+		self.top.destroy()
+
+class Image_File_Dialog:
+	
+	def __init__ (self, parent):
+		# define options for opening or saving a file
+		self.file_opt = options = {}
+		options['defaultextension'] = '.txt'
+		options['filetypes'] = [('all files', '.*'), ('dd files', '.dd'), ('img files', '.img')]
+		#options['initialdir'] = 'C:\\'
+		#options['initialfile'] = ''
+		options['parent'] = root
+		options['title'] = 'Select Image File'
+	
+	def ask_open_filename (self):
+		return tkFileDialog.askopenfilename(**self.file_opt)
+		
+		
+# Read command line argument
+disk_image = None
+
+# Check image file parameter
+if len(sys.argv) > 1 and sys.argv[1] != "":
+	if os.access(sys.argv[1], os.R_OK):
+		# Parameter exists and points to a readable file
+		disk_image=sys.argv[1]
+	else:
+		sys.stderr.write(sys.argv[0]+": disk image "+sys.argv[1]+" is not readable\n")
+		sys.exit(1)
+	
+# Delete existing socket
+if os.path.exists(SOCKET):
+	os.remove(SOCKET)
+  
+# Set exit function
+atexit.register(end_cleanup)
+
+# Write something for the user
+print "USBduplicator "+VERSION
+
+# Create Tk root object
+root = Tk(className='USBduplicator')
+root.title("USBduplicatior "+VERSION)
+root.minsize(300,30)
+
+# Add icon if icon file exists
+if os.path.isfile(PATH_ICON):
+	root_image = PhotoImage(file=PATH_ICON)
+	root.tk.call('wm', 'iconphoto', root._w, root_image)
+
+# Make sure that PATH_MOUNT is executable
+if not is_exe(PATH_MOUNT):
+	# PATH_MOUNT is not executable
+	tkMessageBox.showerror("USBduplicator", sys.argv[0]+": external mount program "+PATH_MOUNT+" is not executable")
+	sys.exit(1)
+
+# Make sure that PATH_UNMOUNT is executable
+if not is_exe(PATH_UNMOUNT):
+	# PATH_UNMOUNT is not executable
+	tkMessageBox.showerror("USBduplicator", sys.argv[0]+": external unmount program "+PATH_UNMOUNT+" is not executable")
+	sys.exit(1)
+
+# Make sure that PATH_DD is executable
+if not is_exe(PATH_DD):
+	# PATH_DD is not executable
+	tkMessageBox.showerror("USBduplicator", sys.argv[0]+": external dd program "+PATH_DD+" is not executable")
+	sys.exit(1)
+
+# Ask for image file if we don't have it
+if disk_image is None:
+	ifd = Image_File_Dialog(root)
+	while disk_image is None:
+		disk_image = ifd.ask_open_filename()
+		# Check if disk_image is readable
+		if not os.access(disk_image, os.R_OK):
+			disk_image = None
+
+# Initialise Linux desktop notification
+Notify.init("easy-stopwatch")
+	
+# Create application instance and run it
+app = Application(root)
+root.mainloop()
+
+# Cleanup (end_cleanup()) is called by atexit. No need to call it manually here
+

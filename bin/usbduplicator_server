@@ -1,0 +1,66 @@
+#!/usr/bin/python
+
+# This file is part of usbduplicator.
+# 
+# Usbduplicator is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# Usbduplicator is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with Usbduplicator.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright 2013 Matti Lattu and Matriculation Examination Board of Finland
+
+import sys, os, socket, syslog
+
+SOCKET="/tmp/usbduplicator"
+
+if not os.path.exists(SOCKET):
+	# Could not find socket
+	# The client is not running
+	syslog.syslog(syslog.LOG_WARNING, "usbduplicator could not find client socket "+SOCKET)
+	sys.exit(1)
+
+# Dump environment data (for debugging)
+#dump = open('/tmp/usbdup.log', "a")
+#dump.write("----\n")
+#for this_env_var in os.environ:
+#	dump.write(this_env_var+": "+os.environ[this_env_var]+"\n")
+#dump.close()
+
+# Get device data (USB device name and path)
+try:
+	device_path = os.environ['DEVNAME']
+except:
+	# Could not get DEVPATH
+	syslog.syslog(syslog.LOG_ERR, "usbduplicator did not get device path from udev")
+	sys.exit(1)
+
+try:
+	device_name = os.environ['ID_VENDOR']+" "+os.environ['ID_MODEL']
+except:
+	# Could not get NAME
+	syslog.syslog(syslog.LOG_ERR, "usbduplicator did not get device name from udev")
+	sys.exit(1)
+
+# Open socket
+try:
+	client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+	client.connect(SOCKET)
+except:
+	# Could not open client
+	syslog.syslog(syslog.LOG_ERR, "usbduplicator could not connect to client socket "+SOCKET)
+	sys.exit(1)
+
+# Send data
+client.send(device_name+"\t"+device_path)
+
+# Close socket
+client.close()
+

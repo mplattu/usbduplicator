@@ -1,0 +1,44 @@
+usbduplicator (0.14) stable; urgency=low
+
+  * GUI using Tk and libnotify
+  * Kill all active writers when interrupted/exiting
+  * Polkit support to gain root privileges when executed via pkexec
+  * Application icon in System folder (starts USBduplicator via pkexec)
+ 
+ -- Matti Lattu <matti.lattu@iki.fi>  Tue, 01 Mar 2015 06:00:00 +0200
+
+usbduplicator (0.13) stable; urgency=low
+
+  * Progress report
+  * Removed verification of written media
+ 
+ -- Matti Lattu <matti.lattu@iki.fi>  Tue, 17 Feb 2015 08:00:00 +0200
+
+digabi-usbduplicator (0.12) stable; urgency=low
+
+  * Even more advanced reporting of USB port
+ 
+ -- Matti Lattu <matti.lattu@iki.fi>  Wed, 29 Jan 2014 22:36:00 +0200
+
+digabi-usbduplicator (0.11) stable; urgency=low
+
+  * Advanced reporting of USB port
+  * Removed "syslinux" from list of dependent packages
+  * Added "usbutils" to list of suggested packages
+ 
+ -- Matti Lattu <matti.lattu@iki.fi>  Wed, 29 Jan 2014 09:00:00 +0200
+
+digabi-usbduplicator (0.10) stable; urgency=low
+
+  * Changes to usbduplicator_mkdisk:
+  * Write disk image using dd
+  * Verify disk image with MD5SUM
+ 
+ -- Matti Lattu <matti.lattu@iki.fi>  Tue, 22 Jan 2014 09:00:00 +0200
+
+digabi-usbduplicator (0.9) stable; urgency=low
+
+  * Initial version.
+ 
+ -- Matti Lattu <matti.lattu@iki.fi>  Sat, 19 Oct 2013 09:00:00 +0200
+

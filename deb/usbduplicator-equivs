@@ -1,0 +1,34 @@
+### Commented entries have reasonable defaults.
+### Uncomment to edit them.
+# Source: <source package name; defaults to package name>
+Section: misc
+Priority: optional
+# Homepage: <enter URL here; no default>
+Standards-Version: 3.9.2
+Package: usbduplicator
+Version: 0.14
+Maintainer: Matti Lattu <matti.lattu@iki.fi>
+# Pre-Depends: <comma-separated list of packages>
+Depends: util-linux, coreutils, bash, python-tk, python-notify, policykit-1, policykit-1-gnome | polkit-kde-1 | lxpolkit | mate-polkit | razorqt-policykit-agent
+# Recommends: <comma-separated list of packages>
+Suggests: usbutils
+# Provides: <comma-separated list of packages>
+# Replaces: <comma-separated list of packages>
+Architecture: all
+Copyright: COPYING
+Changelog: changelog.Debian
+Readme: README.Debian
+#Extra-Files: COPYING
+Files: ../config/98-usbduplicator.rules /lib/udev/rules.d
+ ../bin/usbduplicator /usr/bin
+ ../bin/usbduplicator_server /usr/sbin
+ ../config/org.usbduplicator.policy /usr/share/polkit-1/actions
+ ../config/usbduplicator.desktop /usr/share/applications
+ ../icons/usbduplicator.png /usr/share/pixmaps
+ ../icons/usbduplicator.gif /usr/share/usbduplicator
+Description: USBduplicator is a perfect tool that mass copies
+ dd images to USB memory sticks. It is useful if you need to make a large
+ number of identical USB memories.
+ .
+ USBduplicator does not contain any decent documentation.
+ 

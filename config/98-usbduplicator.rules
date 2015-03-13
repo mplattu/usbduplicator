@@ -1,0 +1,15 @@
+# USBduplicator
+# - Run usbduplicator_server when USB storage is inserted
+# - Prevent USB block device automount
+#
+# Show data:
+#    udevadm info -q all -n /dev/sdb
+# Debug:
+#    lsusb -> BUS/DEVICE
+#    udevadm test /dev/bus/usb/BUS/DEVICE
+
+# Run USBduplicator server whenever new USB block device is inserted and USBduplicator client socket exists
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_BUS}=="usb", TEST=="/tmp/usbduplicator", RUN+="/usr/sbin/usbduplicator_server"
+# Prevent processing of USB block device filesystems if USBduplicator client socket exists
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd*", ENV{ID_BUS}=="usb", TEST=="/tmp/usbduplicator", ENV{UDISKS_PRESENTATION_NOPOLICY}="1", ENV{UDISKS_IGNORE}="TRUE", ENV{UDISKS_AUTO}="FALSE"
+

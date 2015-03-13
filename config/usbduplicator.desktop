@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=USBduplicator
+GenericName=USBduplicator
+Comment=USBduplicator
+Icon=usbduplicator.png
+Exec=/bin/bash -c "/usr/bin/pkexec /usr/bin/usbduplicator >/dev/null 2>/dev/null"
+Terminal=false
+Categories=System;Utility;
