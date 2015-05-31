@@ -4,7 +4,7 @@ USBduplicator .deb packages are created by equivs.
 
 ```
 cd deb
-equivs-build usbduplicator-equivs
+sh create_deb.sh
 ```
 
 # Updating control files for a new version number
