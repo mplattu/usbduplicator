@@ -23,14 +23,14 @@ from subprocess import Popen, STDOUT, PIPE
 from array import array
 from Tkinter import *
 import tkMessageBox, tkFileDialog
-from gi.repository import Notify
+import pynotify
 
 SOCKET="/tmp/usbduplicator"
 PATH_MOUNT="/bin/mount"
 PATH_UNMOUNT="/bin/umount"
 PATH_DD="/bin/dd"
 PATH_ICON="/usr/share/usbduplicator/usbduplicator.gif"
-VERSION="0.14"
+VERSION="0.14.1"
 
 def is_exe(fpath):
      return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
@@ -81,8 +81,12 @@ def non_block_read(output):
 def notify_user(message):
 	# Send Desktop notification
 	print "notify_user: "+message
-	this_notification=Notify.Notification.new("USBduplicator",message,"dialog-information")
-	this_notification.show()
+	try:
+		pynotify.init("USBduplicator")
+		this_notification = pynotify.Notification("USBduplicator",message,"dialog-information")
+		this_notification.show()
+	except:
+		print "Failed to show notification"
 	 
 class USBduplicatorUnmountFailed(Exception):
 	def __init__(self, device_path):
@@ -519,9 +523,6 @@ if disk_image is None:
 		if not os.access(disk_image, os.R_OK):
 			disk_image = None
 
-# Initialise Linux desktop notification
-Notify.init("easy-stopwatch")
-	
 # Create application instance and run it
 app = Application(root)
 root.mainloop()
